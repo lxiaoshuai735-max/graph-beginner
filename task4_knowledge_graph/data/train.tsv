@@ -1,0 +1,14 @@
+Beijing	capital_of	China
+Shanghai	located_in	China
+Shenzhen	located_in	China
+Paris	capital_of	France
+Berlin	capital_of	Germany
+Tokyo	capital_of	Japan
+China	located_in	Asia
+Japan	located_in	Asia
+France	located_in	Europe
+Germany	located_in	Europe
+Beijing	connected_to	Shanghai
+Paris	connected_to	Lyon
+Berlin	connected_to	Munich
+Tokyo	connected_to	Osaka
