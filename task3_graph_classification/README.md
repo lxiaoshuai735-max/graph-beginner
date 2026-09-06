@@ -8,4 +8,4 @@ python task3_graph_classification/code/train.py --dataset proteins --model gin -
 python task3_graph_classification/code/train.py --dataset zinc --model gcn --pool all --epochs 50
 ```
 
-结果保存到 `task3_graph_classification/results.json`。使用 `--lr`、`--layers` 做参数消融。
+结果保存到 `task3_graph_classification/results.json`，包含批量大小、超参数和经过设备同步的训练耗时。使用 `--lr`、`--layers` 做参数消融；在仓库根目录运行 `python run_batch_ablation.py` 可比较不同批量大小的性能与耗时。

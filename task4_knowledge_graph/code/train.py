@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader, TensorDataset
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from common import resolve_device, set_seed  # noqa: E402
+from common import resolve_device, set_seed, synchronize_device  # noqa: E402
 
 
 def read_triples(path: Path) -> list[tuple[str, str, str]]:
@@ -82,26 +82,56 @@ class RotatE(nn.Module):
 
 
 class ConvE(nn.Module):
-    """Compact ConvE-style 1-D convolutional interaction."""
+    """ConvE interaction using a 2-D head/relation embedding stack."""
 
     def __init__(self, entities: int, relations: int, dim: int, gamma: float) -> None:
         super().__init__()
-        if dim < 4:
-            raise ValueError("ConvE requires dim >= 4")
+        if dim < 1:
+            raise ValueError("ConvE requires dim >= 1")
+        # Choose the most square factorisation available. Prime dimensions safely
+        # fall back to (1, dim), while the adaptive kernel remains valid.
+        self.embedding_height = math.isqrt(dim)
+        while dim % self.embedding_height:
+            self.embedding_height -= 1
+        self.embedding_width = dim // self.embedding_height
+        stacked_height = 2 * self.embedding_height
+        kernel_height = min(3, stacked_height)
+        kernel_width = min(3, self.embedding_width)
+        feature_height = stacked_height - kernel_height + 1
+        feature_width = self.embedding_width - kernel_width + 1
+
         self.entity = nn.Embedding(entities, dim)
         self.relation = nn.Embedding(relations, dim)
-        self.conv = nn.Conv1d(2, 32, kernel_size=3)
-        self.projection = nn.Linear(32 * (dim - 2), dim)
-        self.dropout = nn.Dropout(0.2)
+        self.input_dropout = nn.Dropout(0.2)
+        self.conv = nn.Conv2d(1, 32, kernel_size=(kernel_height, kernel_width))
+        self.feature_dropout = nn.Dropout2d(0.2)
+        self.projection = nn.Linear(32 * feature_height * feature_width, dim)
+        self.hidden_dropout = nn.Dropout(0.3)
         self.bias = nn.Parameter(torch.zeros(entities))
         nn.init.xavier_uniform_(self.entity.weight)
         nn.init.xavier_uniform_(self.relation.weight)
+        nn.init.xavier_uniform_(self.conv.weight)
+        nn.init.zeros_(self.conv.bias)
+
+    def encode_query(self, h: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
+        """Encode ``(head, relation)`` pairs into tail-query vectors."""
+        batch_shape = h.shape
+        head = self.entity(h).reshape(-1, 1, self.embedding_height, self.embedding_width)
+        relation = self.relation(r).reshape(-1, 1, self.embedding_height, self.embedding_width)
+        stacked = torch.cat([head, relation], dim=2)
+        features = F.relu(self.conv(self.input_dropout(stacked)))
+        features = self.feature_dropout(features).flatten(start_dim=1)
+        query = self.hidden_dropout(F.relu(self.projection(features)))
+        return query.reshape(*batch_shape, -1)
 
     def score(self, h, r, t):
-        stacked = torch.stack([self.entity(h), self.relation(r)], dim=1)
-        features = self.conv(stacked).relu().flatten(1)
-        query = self.dropout(self.projection(features).relu())
+        query = self.encode_query(h, r)
         return (query * self.entity(t)).sum(dim=-1) + self.bias[t]
+
+    def score_all_tails(self, h: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
+        """Score every entity as a tail for each ``(head, relation)`` pair."""
+        query = self.encode_query(h, r)
+        return query @ self.entity.weight.transpose(0, 1) + self.bias
 
 
 def build_model(name: str, entities: int, relations: int, dim: int, gamma: float):
@@ -113,6 +143,7 @@ def train_model(model, triples: torch.Tensor, entities: int, args, device) -> tu
     loader = DataLoader(TensorDataset(triples), batch_size=args.batch_size, shuffle=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     model.train()
+    synchronize_device(device)
     started = time.perf_counter()
     final_loss = 0.0
     for _ in range(args.epochs):
@@ -130,6 +161,7 @@ def train_model(model, triples: torch.Tensor, entities: int, args, device) -> tu
             loss.backward()
             optimizer.step()
             final_loss = float(loss.detach())
+    synchronize_device(device)
     return final_loss, time.perf_counter() - started
 
 
@@ -147,7 +179,10 @@ def filtered_metrics(model, test: torch.Tensor, all_triples: torch.Tensor, entit
         # Tail prediction: (h, r, ?)
         heads = torch.full((entities,), h, dtype=torch.long, device=device)
         relations = torch.full((entities,), r, dtype=torch.long, device=device)
-        scores = model.score(heads, relations, candidates)
+        if hasattr(model, "score_all_tails"):
+            scores = model.score_all_tails(heads[:1], relations[:1]).squeeze(0)
+        else:
+            scores = model.score(heads, relations, candidates)
         for other in known_tails[(h, r)] - {target}:
             scores[other] = -torch.inf
         target_score = scores[target]
@@ -189,9 +224,14 @@ def run(args) -> list[dict]:
             "relations": len(relation_map),
             "train_triples": len(train),
             "evaluation_queries": len(test) * 2,
+            "epochs": args.epochs,
+            "embedding_dim": args.dim,
+            "learning_rate": args.lr,
+            "batch_size": args.batch_size,
             "train_loss": loss,
             "train_seconds": elapsed,
             "device": str(device),
+            "timing_protocol": "device_synchronized_training_only",
             **filtered_metrics(model, test, all_triples, len(entity_map), device),
         }
         results.append(row)

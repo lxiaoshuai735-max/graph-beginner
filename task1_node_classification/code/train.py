@@ -15,20 +15,30 @@ from torch_geometric.loader import NeighborLoader
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from common import GNNEncoder, load_node_dataset, resolve_device, set_seed  # noqa: E402
+from common import (  # noqa: E402
+    GNNEncoder,
+    load_node_dataset,
+    resolve_device,
+    set_seed,
+    synchronize_device,
+)
 
 
 @torch.no_grad()
 def accuracy(model, data, mask, device) -> float:
     model.eval()
-    data = data.to(device)
+    # PyG's Data.to mutates the object. Clone so a preceding full-graph run does
+    # not move the shared dataset away from CPU before NeighborLoader uses it.
+    data = data.clone().to(device)
+    mask = mask.to(device)
     prediction = model(data.x, data.edge_index).argmax(dim=-1)
     return float((prediction[mask] == data.y[mask]).float().mean())
 
 
 def train_full(model, data, epochs: int, lr: float, weight_decay: float, device) -> dict:
-    data = data.to(device)
+    data = data.clone().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    synchronize_device(device)
     started = time.perf_counter()
     for _ in range(epochs):
         model.train()
@@ -37,6 +47,7 @@ def train_full(model, data, epochs: int, lr: float, weight_decay: float, device)
         loss = F.cross_entropy(logits[data.train_mask], data.y[data.train_mask])
         loss.backward()
         optimizer.step()
+    synchronize_device(device)
     elapsed = time.perf_counter() - started
     return {
         "mode": "full",
@@ -57,6 +68,7 @@ def train_sampled(model, data, epochs: int, lr: float, weight_decay: float, devi
         num_workers=0,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    synchronize_device(device)
     started = time.perf_counter()
     batches = 0
     for _ in range(epochs):
@@ -69,6 +81,7 @@ def train_sampled(model, data, epochs: int, lr: float, weight_decay: float, devi
             loss.backward()
             optimizer.step()
             batches += 1
+    synchronize_device(device)
     elapsed = time.perf_counter() - started
     return {
         "mode": "sampled",
@@ -106,7 +119,20 @@ def run(args) -> list[dict]:
                     model, data, args.epochs, args.lr, args.weight_decay, device,
                     args.batch_size, args.fanout, args.layers,
                 )
-            row = {"task": "node_classification", "dataset": args.dataset, "model": model_name, "device": str(device), **metrics}
+            row = {
+                "task": "node_classification",
+                "dataset": args.dataset,
+                "model": model_name,
+                "device": str(device),
+                "epochs": args.epochs,
+                "hidden_channels": args.hidden,
+                "layers": args.layers,
+                "learning_rate": args.lr,
+                "batch_size": args.batch_size if mode == "sampled" else None,
+                "fanout": args.fanout if mode == "sampled" else None,
+                "timing_protocol": "device_synchronized_training_only",
+                **metrics,
+            }
             results.append(row)
             print(json.dumps(row, ensure_ascii=False))
     return results

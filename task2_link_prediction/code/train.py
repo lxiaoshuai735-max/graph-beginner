@@ -18,7 +18,13 @@ from torch_geometric.transforms import RandomLinkSplit
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from common import GNNEncoder, load_node_dataset, resolve_device, set_seed  # noqa: E402
+from common import (  # noqa: E402
+    GNNEncoder,
+    load_node_dataset,
+    resolve_device,
+    set_seed,
+    synchronize_device,
+)
 
 
 class LinkPredictor(nn.Module):
@@ -38,15 +44,17 @@ class LinkPredictor(nn.Module):
 @torch.no_grad()
 def evaluate(model, data, device) -> float:
     model.eval()
-    data = data.to(device)
+    # Keep the original split on CPU for a later LinkNeighborLoader run.
+    data = data.clone().to(device)
     z = model.encode(data.x, data.edge_index)
     logits = model.decode(z, data.edge_label_index)
     return float(roc_auc_score(data.edge_label.cpu().numpy(), logits.sigmoid().cpu().numpy()))
 
 
 def train_full(model, train_data, val_data, test_data, args, device) -> dict:
-    train_data = train_data.to(device)
+    train_data = train_data.clone().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    synchronize_device(device)
     started = time.perf_counter()
     for _ in range(args.epochs):
         model.train()
@@ -56,6 +64,7 @@ def train_full(model, train_data, val_data, test_data, args, device) -> dict:
         loss = F.binary_cross_entropy_with_logits(logits, train_data.edge_label.float())
         loss.backward()
         optimizer.step()
+    synchronize_device(device)
     elapsed = time.perf_counter() - started
     return {
         "mode": "full",
@@ -77,6 +86,7 @@ def train_sampled(model, train_data, val_data, test_data, args, device) -> dict:
         num_workers=0,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    synchronize_device(device)
     started = time.perf_counter()
     batches = 0
     for _ in range(args.epochs):
@@ -90,6 +100,7 @@ def train_sampled(model, train_data, val_data, test_data, args, device) -> dict:
             loss.backward()
             optimizer.step()
             batches += 1
+    synchronize_device(device)
     elapsed = time.perf_counter() - started
     return {
         "mode": "sampled",
@@ -125,7 +136,20 @@ def run(args) -> list[dict]:
                 metrics = train_full(model, train_data, val_data, test_data, args, device)
             else:
                 metrics = train_sampled(model, train_data, val_data, test_data, args, device)
-            row = {"task": "link_prediction", "dataset": args.dataset, "model": model_name, "device": str(device), **metrics}
+            row = {
+                "task": "link_prediction",
+                "dataset": args.dataset,
+                "model": model_name,
+                "device": str(device),
+                "epochs": args.epochs,
+                "hidden_channels": args.hidden,
+                "layers": args.layers,
+                "learning_rate": args.lr,
+                "batch_size": args.batch_size if mode == "sampled" else None,
+                "fanout": args.fanout if mode == "sampled" else None,
+                "timing_protocol": "device_synchronized_training_only",
+                **metrics,
+            }
             results.append(row)
             print(json.dumps(row, ensure_ascii=False))
     return results

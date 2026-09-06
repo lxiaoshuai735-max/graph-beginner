@@ -5,8 +5,12 @@ __pycache__/
 task1_node_classification/data/*/
 task2_link_prediction/data/*/
 task3_graph_classification/data/*/
-task1_node_classification/results*.json
-task2_link_prediction/results*.json
-task3_graph_classification/results*.json
-task4_knowledge_graph/results*.json
+task4_knowledge_graph/data/*.tsv
 experiments/tmp/
+**/results_quick.json
+**/results_*_smoke.json
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors

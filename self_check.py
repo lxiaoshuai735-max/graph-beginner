@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 
 import torch
+from torch import nn
 from torch_geometric.data import Data
 from torch_geometric.loader import LinkNeighborLoader, NeighborLoader
 
 from common import GNNEncoder, resolve_device, set_seed
 from task3_graph_classification.code.train import GraphModel
-from task4_knowledge_graph.code.train import build_model
+from task4_knowledge_graph.code.train import build_model, filtered_metrics
 
 
-def main() -> None:
+def main(device_name: str = "auto") -> None:
     set_seed(7)
-    device = resolve_device("auto")
+    device = resolve_device(device_name)
     edge_index = torch.tensor(
         [[0, 1, 1, 2, 2, 3, 3, 0, 0, 2], [1, 0, 2, 1, 3, 2, 0, 3, 2, 0]],
         dtype=torch.long,
@@ -59,9 +61,37 @@ def main() -> None:
         score.sum().backward()
         results["kge"][name] = list(score.shape)
 
+    # Exercise square, composite, prime, and minimal embedding dimensions. This
+    # catches invalid ConvE reshape/kernel assumptions without a dataset download.
+    conve_dimensions = {}
+    for dim in [1, 16, 17, 100]:
+        model = build_model("conve", entities=4, relations=2, dim=dim, gamma=8.0).to(device)
+        if not isinstance(model.conv, nn.Conv2d):
+            raise AssertionError("ConvE must use Conv2d")
+        if model.embedding_height * model.embedding_width != dim:
+            raise AssertionError(f"invalid ConvE reshape for dim={dim}")
+        score = model.score(triples[:, 0], triples[:, 1], triples[:, 2])
+        if score.shape != (2,) or not bool(torch.isfinite(score).all()):
+            raise AssertionError(f"invalid ConvE scores for dim={dim}")
+        all_tail_scores = model.score_all_tails(triples[:, 0], triples[:, 1])
+        if all_tail_scores.shape != (2, 4) or not bool(torch.isfinite(all_tail_scores).all()):
+            raise AssertionError(f"invalid ConvE all-tail scores for dim={dim}")
+        score.sum().backward()
+        conve_dimensions[str(dim)] = [model.embedding_height, model.embedding_width]
+    results["kge"]["conve_reshape_checks"] = conve_dimensions
+
+    ranking_model = build_model("conve", entities=4, relations=2, dim=16, gamma=8.0).to(device)
+    ranking = filtered_metrics(ranking_model, triples, triples, entities=4, device=device)
+    if set(ranking) != {"mrr", "hits@1", "hits@3", "hits@10", "mean_rank"}:
+        raise AssertionError("filtered ranking returned an unexpected metric schema")
+    results["kge"]["conve_filtered_ranking"] = ranking
+
     print(json.dumps(results, ensure_ascii=False, indent=2))
     print("SELF_CHECK_OK")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--device", default="auto")
+    arguments = parser.parse_args()
+    main(arguments.device)

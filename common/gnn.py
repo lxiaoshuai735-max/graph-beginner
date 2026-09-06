@@ -27,6 +27,12 @@ def resolve_device(value: str = "auto") -> torch.device:
     return torch.device(value)
 
 
+def synchronize_device(device: torch.device) -> None:
+    """Wait for queued CUDA work so wall-clock timings are comparable."""
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
 def load_node_dataset(name: str, root: str | Path):
     name = name.lower()
     root = Path(root)

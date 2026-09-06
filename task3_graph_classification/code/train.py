@@ -18,7 +18,7 @@ from torch_geometric.nn import global_max_pool, global_mean_pool
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from common import GNNEncoder, resolve_device, set_seed  # noqa: E402
+from common import GNNEncoder, resolve_device, set_seed, synchronize_device  # noqa: E402
 
 
 class GraphModel(nn.Module):
@@ -119,10 +119,12 @@ def run(args) -> list[dict]:
             set_seed(args.seed)
             model = GraphModel(in_channels, args.hidden, out_channels, model_name, args.layers, args.dropout, pool, categorical).to(device)
             optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+            synchronize_device(device)
             started = time.perf_counter()
             final_loss = 0.0
             for _ in range(args.epochs):
                 final_loss = run_epoch(model, loaders[0], optimizer, device, task_type)
+            synchronize_device(device)
             elapsed = time.perf_counter() - started
             row = {
                 "task": "graph_classification" if task_type == "classification" else "graph_regression",
@@ -130,6 +132,12 @@ def run(args) -> list[dict]:
                 "model": model_name,
                 "pool": pool,
                 "device": str(device),
+                "epochs": args.epochs,
+                "hidden_channels": args.hidden,
+                "layers": args.layers,
+                "learning_rate": args.lr,
+                "batch_size": args.batch_size,
+                "timing_protocol": "device_synchronized_training_only",
                 "train_loss": final_loss,
                 "train_seconds": elapsed,
                 "seconds_per_epoch": elapsed / args.epochs,

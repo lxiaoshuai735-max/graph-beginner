@@ -8,4 +8,4 @@ python task1_node_classification/code/train.py --dataset citeseer --model gcn --
 python task1_node_classification/code/train.py --dataset flickr --model sage --mode sampled --epochs 30 --batch-size 2048
 ```
 
-结果保存为 `task1_node_classification/results.json`，含验证/测试准确率、总时间和每轮时间。可分别调整 `--lr`、`--layers`、`--hidden` 进行参数对照。
+结果保存为 `task1_node_classification/results.json`，含验证/测试准确率、超参数、总时间和每轮时间。CUDA 计时在训练循环前后显式同步；可分别调整 `--lr`、`--layers`、`--hidden` 进行参数对照。
